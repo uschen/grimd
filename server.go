@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"go.uber.org/zap"
 )
 
 // Server type
@@ -12,11 +13,12 @@ type Server struct {
 	host     string
 	rTimeout time.Duration
 	wTimeout time.Duration
+	logger   *zap.Logger
 }
 
 // Run starts the server
 func (s *Server) Run() {
-	Handler := NewHandler()
+	Handler := NewHandler(s.logger)
 
 	tcpHandler := dns.NewServeMux()
 	tcpHandler.HandleFunc(".", Handler.DoTCP)

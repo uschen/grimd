@@ -23,6 +23,9 @@ type config struct {
 	SourceDirs        []string
 	Log               string
 	LogLevel          int
+	LogGCPProject     string
+	LogGCPKeyPath     string
+	LogID             string
 	Bind              string
 	API               string
 	Nullroute         string
@@ -62,6 +65,12 @@ sourcedirs = [
 
 # location of the log file
 log = "grimd.log"
+
+logGCPProject = "someproject"
+
+logGCPKeyPath = "./some.json"
+
+logID = "some_id"
 
 # what kind of information should be logged, 0 = errors and important operations, 1 = dns queries, 2 = debug
 loglevel = 0

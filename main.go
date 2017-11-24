@@ -1,12 +1,20 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"os"
 	"os/signal"
 	"runtime"
 	"time"
+
+	"cloud.google.com/go/logging"
+	"github.com/looterz/grimd/zapstackdriver"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"google.golang.org/api/option"
+	mrpb "google.golang.org/genproto/googleapis/api/monitoredres"
 )
 
 var (
@@ -38,6 +46,36 @@ func main() {
 	}
 	defer logFile.Close()
 
+	l := zap.NewAtomicLevel()
+	if err := l.UnmarshalText([]byte("info")); err != nil {
+		log.Fatal(err)
+	}
+
+	ops := []option.ClientOption{}
+	if Config.LogGCPKeyPath != "" {
+		ops = append(ops, option.WithServiceAccountFile(Config.LogGCPKeyPath))
+	}
+	clogClient, err := logging.NewClient(context.Background(), Config.LogGCPKeyPath, ops...)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer clogClient.Close()
+	cLogger := clogClient.Logger(Config.LogID,
+		logging.CommonLabels(map[string]string{"lang": "go"}),
+		logging.CommonResource(&mrpb.MonitoredResource{
+			Type: "global",
+			Labels: map[string]string{
+				"project_id": Config.LogGCPProject,
+			},
+		}),
+	)
+	defer cLogger.Flush()
+	core, err := zapstackdriver.New(l, cLogger)
+	if err != nil {
+		log.Fatal(err)
+	}
+	logger := zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel))
+
 	// delay updating the blocklists, cache until the server starts and can serve requests as the local resolver
 	timer := time.NewTimer(time.Second * 1)
 	go func() {
@@ -53,13 +91,14 @@ func main() {
 	}()
 
 	grimdActive = true
-	quit_activation := make(chan bool)
-	go grimdActivation.loop(quit_activation)
+	quitActivation := make(chan bool)
+	go grimdActivation.loop(quitActivation)
 
 	server := &Server{
 		host:     Config.Bind,
 		rTimeout: 5 * time.Second,
 		wTimeout: 5 * time.Second,
+		logger:   logger,
 	}
 
 	server.Run()
@@ -76,7 +115,7 @@ forever:
 		select {
 		case <-sig:
 			log.Printf("signal received, stopping\n")
-			quit_activation <- true
+			quitActivation <- true
 			break forever
 		}
 	}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"go.uber.org/zap"
 )
 
 const (
@@ -40,10 +41,11 @@ type DNSHandler struct {
 	resolver *Resolver
 	cache    Cache
 	negCache Cache
+	logger   *zap.Logger
 }
 
 // NewHandler returns a new DNSHandler
-func NewHandler() *DNSHandler {
+func NewHandler(logger *zap.Logger) *DNSHandler {
 	var (
 		clientConfig *dns.ClientConfig
 		resolver     *Resolver
@@ -63,29 +65,41 @@ func NewHandler() *DNSHandler {
 		Expire:   time.Duration(Config.Expire) * time.Second / 2,
 		Maxcount: Config.Maxcount,
 	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 
-	return &DNSHandler{resolver, cache, negCache}
+	return &DNSHandler{resolver, cache, negCache, logger}
 }
 
 func (h *DNSHandler) do(Net string, w dns.ResponseWriter, req *dns.Msg) {
 	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
 	defer w.Close()
 	q := req.Question[0]
-	Q := Question{UnFqdn(q.Name), dns.TypeToString[q.Qtype], dns.ClassToString[q.Qclass]}
+	qType := dns.TypeToString[q.Qtype]
+	qClass := dns.ClassToString[q.Qclass]
+	llog := h.logger.With(
+		zap.String("q_name", q.Name),
+		zap.String("q_type", qType),
+		zap.String("q_class", qClass),
+		zap.String("client_ip", w.RemoteAddr().String()),
+		zap.String("server_ip", w.LocalAddr().String()),
+	)
 
+	Q := Question{UnFqdn(q.Name), qType, qClass}
 	var remote net.IP
 	if Net == "tcp" {
 		remote = w.RemoteAddr().(*net.TCPAddr).IP
 	} else {
 		remote = w.RemoteAddr().(*net.UDPAddr).IP
 	}
-
+	llog.Info("lookup")
 	if Config.LogLevel > 0 {
 		log.Printf("%s lookup　%s\n", remote, Q.String())
 	}
 
 	var grimdActive = grimdActivation.query()
-	if len(Config.ToggleName) >0 && strings.Contains(Q.Qname, Config.ToggleName) {
+	if len(Config.ToggleName) > 0 && strings.Contains(Q.Qname, Config.ToggleName) {
 		if Config.LogLevel > 0 {
 			log.Printf("Found ToggleName! (%s)\n", Q.Qname)
 		}
@@ -253,12 +267,14 @@ func (h *DNSHandler) DoUDP(w dns.ResponseWriter, req *dns.Msg) {
 	go h.do("udp", w, req)
 }
 
+// HandleFailed -
 func (h *DNSHandler) HandleFailed(w dns.ResponseWriter, message *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetRcode(message, dns.RcodeServerFailure)
 	h.WriteReplyMsg(w, m)
 }
 
+// WriteReplyMsg -
 func (h *DNSHandler) WriteReplyMsg(w dns.ResponseWriter, message *dns.Msg) {
 	defer func() {
 		if r := recover(); r != nil {
