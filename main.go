@@ -55,7 +55,7 @@ func main() {
 	if Config.LogGCPKeyPath != "" {
 		ops = append(ops, option.WithServiceAccountFile(Config.LogGCPKeyPath))
 	}
-	clogClient, err := logging.NewClient(context.Background(), Config.LogGCPKeyPath, ops...)
+	clogClient, err := logging.NewClient(context.Background(), Config.LogGCPProject, ops...)
 	if err != nil {
 		log.Fatal(err)
 	}

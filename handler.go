@@ -93,7 +93,7 @@ func (h *DNSHandler) do(Net string, w dns.ResponseWriter, req *dns.Msg) {
 	} else {
 		remote = w.RemoteAddr().(*net.UDPAddr).IP
 	}
-	llog.Info("lookup")
+
 	if Config.LogLevel > 0 {
 		log.Printf("%s lookup　%s\n", remote, Q.String())
 	}
@@ -199,6 +199,7 @@ func (h *DNSHandler) do(Net string, w dns.ResponseWriter, req *dns.Msg) {
 			if err != nil {
 				log.Printf("Set %s block cache failed: %s\n", Q.String(), err.Error())
 			}
+			llog.Info("lu", zap.Bool("blocked", true))
 
 			return
 		}
@@ -206,7 +207,7 @@ func (h *DNSHandler) do(Net string, w dns.ResponseWriter, req *dns.Msg) {
 			log.Printf("%s not found in blocklist\n", Q.Qname)
 		}
 	}
-
+	llog.Info("lu", zap.Bool("blocked", false))
 	// log query
 	NewEntry := QuestionCacheEntry{Date: time.Now().Unix(), Remote: remote.String(), Query: Q, Blocked: false}
 	go QuestionCache.Add(NewEntry)
