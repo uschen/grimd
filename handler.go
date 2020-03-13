@@ -1,9 +1,9 @@
 package main
 
 import (
-	"log"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -38,14 +38,24 @@ func (q *Question) String() string {
 
 // DNSHandler type
 type DNSHandler struct {
-	resolver *Resolver
-	cache    Cache
-	negCache Cache
-	logger   *zap.Logger
+	requestChannel chan DNSOperationData
+	resolver       *Resolver
+	cache          Cache
+	negCache       Cache
+	active         bool
+	muActive       sync.RWMutex
+	logger         *zap.Logger
+}
+
+// DNSOperationData type
+type DNSOperationData struct {
+	Net string
+	w   dns.ResponseWriter
+	req *dns.Msg
 }
 
 // NewHandler returns a new DNSHandler
-func NewHandler(logger *zap.Logger) *DNSHandler {
+func NewHandler(config *Config, blockCache *MemoryBlockCache, questionCache *MemoryQuestionCache, zaplogger *zap.Logger) *DNSHandler {
 	var (
 		clientConfig *dns.ClientConfig
 		resolver     *Resolver
@@ -56,236 +66,268 @@ func NewHandler(logger *zap.Logger) *DNSHandler {
 	resolver = &Resolver{clientConfig}
 
 	cache = &MemoryCache{
-		Backend:  make(map[string]Mesg, Config.Maxcount),
-		Expire:   time.Duration(Config.Expire) * time.Second,
-		Maxcount: Config.Maxcount,
+		Backend:  make(map[string]*Mesg, config.Maxcount),
+		Maxcount: config.Maxcount,
 	}
 	negCache = &MemoryCache{
-		Backend:  make(map[string]Mesg),
-		Expire:   time.Duration(Config.Expire) * time.Second / 2,
-		Maxcount: Config.Maxcount,
-	}
-	if logger == nil {
-		logger = zap.NewNop()
+		Backend:  make(map[string]*Mesg),
+		Maxcount: config.Maxcount,
 	}
 
-	return &DNSHandler{resolver, cache, negCache, logger}
+	if zaplogger == nil {
+		zaplogger = zap.NewNop()
+	}
+
+	handler := &DNSHandler{
+		requestChannel: make(chan DNSOperationData),
+		resolver:       resolver,
+		cache:          cache,
+		negCache:       negCache,
+		active:         true,
+		logger:         zaplogger,
+	}
+
+	go handler.do(config, blockCache, questionCache)
+
+	return handler
 }
 
-func (h *DNSHandler) do(Net string, w dns.ResponseWriter, req *dns.Msg) {
-	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
-	defer w.Close()
-	q := req.Question[0]
-	qType := dns.TypeToString[q.Qtype]
-	qClass := dns.ClassToString[q.Qclass]
-	llog := h.logger.With(
-		zap.String("q_name", q.Name),
-		zap.String("q_type", qType),
-		zap.String("q_class", qClass),
-		zap.String("client_ip", w.RemoteAddr().String()),
-		zap.String("server_ip", w.LocalAddr().String()),
-	)
-
-	Q := Question{UnFqdn(q.Name), qType, qClass}
-	var remote net.IP
-	if Net == "tcp" {
-		remote = w.RemoteAddr().(*net.TCPAddr).IP
-	} else {
-		remote = w.RemoteAddr().(*net.UDPAddr).IP
-	}
-
-	if Config.LogLevel > 0 {
-		log.Printf("%s lookup　%s\n", remote, Q.String())
-	}
-
-	var grimdActive = grimdActivation.query()
-	if len(Config.ToggleName) > 0 && strings.Contains(Q.Qname, Config.ToggleName) {
-		if Config.LogLevel > 0 {
-			log.Printf("Found ToggleName! (%s)\n", Q.Qname)
+func (h *DNSHandler) do(config *Config, blockCache *MemoryBlockCache, questionCache *MemoryQuestionCache) {
+	for {
+		data, ok := <-h.requestChannel
+		if !ok {
+			break
 		}
-		grimdActive = grimdActivation.toggle()
+		func(Net string, w dns.ResponseWriter, req *dns.Msg) {
+			defer w.Close()
+			q := req.Question[0]
 
-		if Config.LogLevel > 0 {
-			if grimdActive {
-				log.Print("Grimd Activated")
+			qType := dns.TypeToString[q.Qtype]
+			qClass := dns.ClassToString[q.Qclass]
+			llog := h.logger.With(
+				zap.String("q_name", q.Name),
+				zap.String("q_type", qType),
+				zap.String("q_class", qClass),
+				zap.String("client_ip", w.RemoteAddr().String()),
+				zap.String("server_ip", w.LocalAddr().String()),
+			)
+
+			Q := Question{UnFqdn(q.Name), dns.TypeToString[q.Qtype], dns.ClassToString[q.Qclass]}
+
+			var remote net.IP
+			if Net == "tcp" {
+				remote = w.RemoteAddr().(*net.TCPAddr).IP
 			} else {
-				log.Print("Grimd Deactivated")
-			}
-		}
-	}
-
-	IPQuery := h.isIPQuery(q)
-
-	// Only query cache when qtype == 'A'|'AAAA' , qclass == 'IN'
-	key := KeyGen(Q)
-	if IPQuery > 0 {
-		mesg, blocked, err := h.cache.Get(key)
-		if err != nil {
-			if mesg, blocked, err = h.negCache.Get(key); err != nil {
-				if Config.LogLevel > 1 {
-					log.Printf("%s didn't hit cache\n", Q.String())
-				}
-			} else {
-				if Config.LogLevel > 1 {
-					log.Printf("%s hit negative cache\n", Q.String())
-				}
-				h.HandleFailed(w, req)
-				return
-			}
-		} else {
-			if blocked && !grimdActive {
-				if Config.LogLevel > 1 {
-					log.Printf("%s hit cache and was blocked: forwarding request\n", Q.String())
-				}
-			} else {
-				if Config.LogLevel > 1 {
-					log.Printf("%s hit cache\n", Q.String())
-				}
-
-				// we need this copy against concurrent modification of Id
-				msg := *mesg
-				msg.Id = req.Id
-				h.WriteReplyMsg(w, &msg)
-				return
-			}
-		}
-	}
-	// Check blocklist
-	var blacklisted bool = false
-
-	if IPQuery > 0 {
-		blacklisted = BlockCache.Exists(Q.Qname)
-
-		if grimdActive && blacklisted {
-			m := new(dns.Msg)
-			m.SetReply(req)
-
-			nullroute := net.ParseIP(Config.Nullroute)
-			nullroutev6 := net.ParseIP(Config.Nullroutev6)
-
-			switch IPQuery {
-			case _IP4Query:
-				rrHeader := dns.RR_Header{
-					Name:   q.Name,
-					Rrtype: dns.TypeA,
-					Class:  dns.ClassINET,
-					Ttl:    Config.TTL,
-				}
-				a := &dns.A{Hdr: rrHeader, A: nullroute}
-				m.Answer = append(m.Answer, a)
-			case _IP6Query:
-				rrHeader := dns.RR_Header{
-					Name:   q.Name,
-					Rrtype: dns.TypeAAAA,
-					Class:  dns.ClassINET,
-					Ttl:    Config.TTL,
-				}
-				a := &dns.AAAA{Hdr: rrHeader, AAAA: nullroutev6}
-				m.Answer = append(m.Answer, a)
+				remote = w.RemoteAddr().(*net.UDPAddr).IP
 			}
 
-			h.WriteReplyMsg(w, m)
+			logger.Infof("%s lookup　%s\n", remote, Q.String())
 
-			if Config.LogLevel > 0 {
-				log.Printf("%s found in blocklist\n", Q.Qname)
+			var grimdActive = grimdActivation.query()
+			if len(config.ToggleName) > 0 && strings.Contains(Q.Qname, config.ToggleName) {
+				logger.Noticef("Found ToggleName! (%s)\n", Q.Qname)
+				grimdActive = grimdActivation.toggle(config.ReactivationDelay)
+
+				if grimdActive {
+					logger.Notice("Grimd Activated")
+				} else {
+					logger.Notice("Grimd Deactivated")
+				}
 			}
 
+			IPQuery := h.isIPQuery(q)
+
+			// Only query cache when qtype == 'A'|'AAAA' , qclass == 'IN'
+			key := KeyGen(Q)
+			if IPQuery > 0 {
+				mesg, blocked, err := h.cache.Get(key)
+				if err != nil {
+					if mesg, blocked, err = h.negCache.Get(key); err != nil {
+						logger.Debugf("%s didn't hit cache\n", Q.String())
+					} else {
+						logger.Debugf("%s hit negative cache\n", Q.String())
+						h.HandleFailed(w, req)
+						return
+					}
+				} else {
+					if blocked && !grimdActive {
+						logger.Debugf("%s hit cache and was blocked: forwarding request\n", Q.String())
+					} else {
+						logger.Debugf("%s hit cache\n", Q.String())
+
+						// we need this copy against concurrent modification of Id
+						msg := *mesg
+						msg.Id = req.Id
+						h.WriteReplyMsg(w, &msg)
+						return
+					}
+				}
+			}
+			// Check blocklist
+			var blacklisted = false
+			var drblblacklisted bool
+
+			if IPQuery > 0 {
+				blacklisted = blockCache.Exists(Q.Qname)
+
+				if config.UseDrbl > 0 {
+					drblblacklisted = drblCheckHostname(Q.Qname)
+					logger.Debug("DrblBlistCheck enabled and checked =>", Q.Qname, "The result is =>", drblblacklisted)
+				} else {
+					logger.Debug("DrblBlistCheck is disabled for =>", Q.Qname, "The result is =>", drblblacklisted)
+
+				}
+
+				if grimdActive && (blacklisted || drblblacklisted) {
+					m := new(dns.Msg)
+					m.SetReply(req)
+
+					if config.NXDomain {
+						m.SetRcode(req, dns.RcodeNameError)
+					} else {
+						nullroute := net.ParseIP(config.Nullroute)
+						nullroutev6 := net.ParseIP(config.Nullroutev6)
+
+						switch IPQuery {
+						case _IP4Query:
+							rrHeader := dns.RR_Header{
+								Name:   q.Name,
+								Rrtype: dns.TypeA,
+								Class:  dns.ClassINET,
+								Ttl:    config.TTL,
+							}
+							a := &dns.A{Hdr: rrHeader, A: nullroute}
+							m.Answer = append(m.Answer, a)
+						case _IP6Query:
+							rrHeader := dns.RR_Header{
+								Name:   q.Name,
+								Rrtype: dns.TypeAAAA,
+								Class:  dns.ClassINET,
+								Ttl:    config.TTL,
+							}
+							a := &dns.AAAA{Hdr: rrHeader, AAAA: nullroutev6}
+							m.Answer = append(m.Answer, a)
+						}
+					}
+
+					h.WriteReplyMsg(w, m)
+
+					logger.Noticef("%s found in blocklist\n", Q.Qname)
+
+					// log query
+					NewEntry := QuestionCacheEntry{Date: time.Now().Unix(), Remote: remote.String(), Query: Q, Blocked: true}
+					go questionCache.Add(NewEntry)
+
+					// cache the block; we don't know the true TTL for blocked entries: we just enforce our config
+					err := h.cache.Set(key, m, true)
+					if err != nil {
+						logger.Errorf("Set %s block cache failed: %s\n", Q.String(), err.Error())
+					}
+					llog.Info("lu", zap.Bool("blocked", true))
+					return
+				}
+				logger.Debugf("%s not found in blocklist\n", Q.Qname)
+			}
+
+			llog.Info("lu", zap.Bool("blocked", false))
 			// log query
-			NewEntry := QuestionCacheEntry{Date: time.Now().Unix(), Remote: remote.String(), Query: Q, Blocked: true}
-			go QuestionCache.Add(NewEntry)
+			NewEntry := QuestionCacheEntry{Date: time.Now().Unix(), Remote: remote.String(), Query: Q, Blocked: false}
+			go questionCache.Add(NewEntry)
 
-			// cache the block
-			err := h.cache.Set(key, m, true)
+			mesg, err := h.resolver.Lookup(Net, req, config.Timeout, config.Interval, config.Nameservers, config.DoH)
+
 			if err != nil {
-				log.Printf("Set %s block cache failed: %s\n", Q.String(), err.Error())
+				logger.Errorf("resolve query error %s\n", err)
+				h.HandleFailed(w, req)
+
+				// cache the failure, too!
+				if err = h.negCache.Set(key, nil, false); err != nil {
+					logger.Errorf("set %s negative cache failed: %v\n", Q.String(), err)
+				}
+				return
 			}
-			llog.Info("lu", zap.Bool("blocked", true))
 
-			return
-		}
-		if Config.LogLevel > 0 {
-			log.Printf("%s not found in blocklist\n", Q.Qname)
-		}
-	}
-	llog.Info("lu", zap.Bool("blocked", false))
-	// log query
-	NewEntry := QuestionCacheEntry{Date: time.Now().Unix(), Remote: remote.String(), Query: Q, Blocked: false}
-	go QuestionCache.Add(NewEntry)
+			if mesg.Truncated && Net == "udp" {
+				mesg, err = h.resolver.Lookup("tcp", req, config.Timeout, config.Interval, config.Nameservers, config.DoH)
+				if err != nil {
+					logger.Errorf("resolve tcp query error %s\n", err)
+					h.HandleFailed(w, req)
 
-	mesg, err := h.resolver.Lookup(Net, req)
-
-	if err != nil {
-		log.Printf("resolve query error %s\n", err)
-		h.HandleFailed(w, req)
-
-		// cache the failure, too!
-		if err = h.negCache.Set(key, nil, false); err != nil {
-			log.Printf("set %s negative cache failed: %v\n", Q.String(), err)
-		}
-		return
-	}
-
-	if mesg.Truncated && Net == "udp" {
-		mesg, err = h.resolver.Lookup("tcp", req)
-		if err != nil {
-			log.Printf("resolve tcp query error %s\n", err)
-			h.HandleFailed(w, req)
-
-			// cache the failure, too!
-			if err = h.negCache.Set(key, nil, false); err != nil {
-				log.Printf("set %s negative cache failed: %v\n", Q.String(), err)
+					// cache the failure, too!
+					if err = h.negCache.Set(key, nil, false); err != nil {
+						logger.Errorf("set %s negative cache failed: %v\n", Q.String(), err)
+					}
+					return
+				}
 			}
-			return
-		}
-	}
 
-	h.WriteReplyMsg(w, mesg)
+			//find the smallest ttl
+			ttl := config.Expire
+			var candidateTTL uint32
 
-	if IPQuery > 0 && len(mesg.Answer) > 0 {
-		if !grimdActive && blacklisted {
-			if Config.LogLevel > 0 {
-				log.Printf("%s is blacklisted and grimd not active: not caching\n", Q.String())
+			for index, answer := range mesg.Answer {
+				logger.Debugf("Answer %d - %s\n", index, answer.String())
+
+				candidateTTL = answer.Header().Ttl
+
+				if candidateTTL > 0 && candidateTTL < ttl {
+					ttl = candidateTTL
+				}
 			}
-		} else {
-			err = h.cache.Set(key, mesg, false)
-			if err != nil {
-				log.Printf("set %s cache failed: %s\n", Q.String(), err.Error())
+
+			h.WriteReplyMsg(w, mesg)
+
+			if IPQuery > 0 && len(mesg.Answer) > 0 {
+				if !grimdActive && blacklisted {
+					logger.Debugf("%s is blacklisted and grimd not active: not caching\n", Q.String())
+				} else {
+					err = h.cache.Set(key, mesg, false)
+					if err != nil {
+						logger.Errorf("set %s cache failed: %s\n", Q.String(), err.Error())
+					}
+					logger.Debugf("insert %s into cache with ttl %d\n", Q.String(), ttl)
+				}
 			}
-			if Config.LogLevel > 0 {
-				log.Printf("insert %s into cache\n", Q.String())
-			}
-		}
+		}(data.Net, data.w, data.req)
 	}
 }
 
 // DoTCP begins a tcp query
 func (h *DNSHandler) DoTCP(w dns.ResponseWriter, req *dns.Msg) {
-	go h.do("tcp", w, req)
+	h.muActive.RLock()
+	if h.active {
+		h.requestChannel <- DNSOperationData{"tcp", w, req}
+	}
+	h.muActive.RUnlock()
 }
 
 // DoUDP begins a udp query
 func (h *DNSHandler) DoUDP(w dns.ResponseWriter, req *dns.Msg) {
-	go h.do("udp", w, req)
+	h.muActive.RLock()
+	if h.active {
+		h.requestChannel <- DNSOperationData{"udp", w, req}
+	}
+	h.muActive.RUnlock()
 }
 
-// HandleFailed -
+// HandleFailed handles dns failures
 func (h *DNSHandler) HandleFailed(w dns.ResponseWriter, message *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetRcode(message, dns.RcodeServerFailure)
 	h.WriteReplyMsg(w, m)
 }
 
-// WriteReplyMsg -
+// WriteReplyMsg writes the dns reply
 func (h *DNSHandler) WriteReplyMsg(w dns.ResponseWriter, message *dns.Msg) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("Recovered in WriteReplyMsg: %s\n", r)
+			logger.Noticef("Recovered in WriteReplyMsg: %s\n", r)
 		}
 	}()
 
 	err := w.WriteMsg(message)
 	if err != nil {
-		log.Println(err)
+		logger.Error(err)
 	}
 }
 

@@ -51,9 +51,9 @@ func (e SerializerError) Error() string {
 
 // Mesg represents a cache entry
 type Mesg struct {
-	Msg     *dns.Msg
-	Blocked bool
-	Expire  time.Time
+	Msg            *dns.Msg
+	Blocked        bool
+	LastUpdateTime time.Time
 }
 
 // Cache interface
@@ -67,18 +67,20 @@ type Cache interface {
 
 // MemoryCache type
 type MemoryCache struct {
-	Backend  map[string]Mesg
-	Expire   time.Duration
+	Backend  map[string]*Mesg
 	Maxcount int
 	mu       sync.RWMutex
 }
 
 const (
-	BlockCacheEntryString = iota
-	BlockCacheEntryRegexp
+	// BlockCacheEntryRegexp marks the regexp based BlockCache entries
+	BlockCacheEntryRegexp = iota
+	// BlockCacheEntryGlob marks the glob based BlockCache entries
 	BlockCacheEntryGlob
 )
 
+// BlockCacheSpecial holds the extra data of a BlockCache entry
+// used to perform glob or regexp matching.
 type BlockCacheSpecial struct {
 	Data string
 	Type int
@@ -102,18 +104,41 @@ type MemoryQuestionCache struct {
 func (c *MemoryCache) Get(key string) (*dns.Msg, bool, error) {
 	key = strings.ToLower(key)
 
-	c.mu.RLock()
+	//Truncate time to the second, so that subsecond queries won't keep moving
+	//forward the last update time without touching the TTL
+	now := WallClock.Now().Truncate(time.Second)
+
+	expired := false
+	c.mu.Lock()
 	mesg, ok := c.Backend[key]
-	c.mu.RUnlock()
+	if ok && mesg.Msg == nil {
+		ok = false
+		logger.Warningf("Cache: key %s returned nil entry", key)
+		c.removeNoLock(key)
+	}
+	if ok {
+		elapsed := uint32(now.Sub(mesg.LastUpdateTime).Seconds())
+		for _, answer := range mesg.Msg.Answer {
+			if elapsed > answer.Header().Ttl {
+				logger.Debugf("Cache: Key expired %s", key)
+				c.removeNoLock(key)
+				expired = true
+			}
+			answer.Header().Ttl -= elapsed
+		}
+	}
+	c.mu.Unlock()
 
 	if !ok {
+		logger.Debugf("Cache: Cannot find key %s\n", key)
 		return nil, false, KeyNotFound{key}
 	}
 
-	if mesg.Expire.Before(time.Now()) {
-		c.Remove(key)
+	if expired {
 		return nil, false, KeyExpired{key}
 	}
+
+	mesg.LastUpdateTime = now
 
 	return mesg.Msg, mesg.Blocked, nil
 }
@@ -125,22 +150,26 @@ func (c *MemoryCache) Set(key string, msg *dns.Msg, blocked bool) error {
 	if c.Full() && !c.Exists(key) {
 		return CacheIsFull{}
 	}
-
-	expire := time.Now().Add(c.Expire)
-	mesg := Mesg{msg, blocked, expire}
+	if msg == nil {
+		logger.Debugf("Setting an empty value for key %s", key)
+	}
 	c.mu.Lock()
-	c.Backend[key] = mesg
+	c.Backend[key] = &Mesg{msg, blocked, WallClock.Now().Truncate(time.Second)}
 	c.mu.Unlock()
 
 	return nil
 }
 
 // Remove removes an entry from the cache
-func (c *MemoryCache) Remove(key string) {
+func (c *MemoryCache) removeNoLock(key string) {
 	key = strings.ToLower(key)
-
-	c.mu.Lock()
 	delete(c.Backend, key)
+}
+
+// Remove removes an entry from the cache
+func (c *MemoryCache) Remove(key string) {
+	c.mu.Lock()
+	c.removeNoLock(key)
 	c.mu.Unlock()
 }
 
@@ -175,6 +204,7 @@ func KeyGen(q Question) string {
 	h.Write([]byte(q.String()))
 	x := h.Sum(nil)
 	key := fmt.Sprintf("%x", x)
+	logger.Debugf("KeyGen: %s %s", q.String(), key)
 	return key
 }
 
@@ -261,7 +291,7 @@ func (c *MemoryQuestionCache) Add(q QuestionCacheEntry) {
 // Clear clears the contents of the cache
 func (c *MemoryQuestionCache) Clear() {
 	c.mu.Lock()
-	c.Backend = nil
+	c.Backend = make([]QuestionCacheEntry, 0, 0)
 	c.mu.Unlock()
 }
 
@@ -270,4 +300,16 @@ func (c *MemoryQuestionCache) Length() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return len(c.Backend)
+}
+
+// GetOlder eturns a slice of the entries older than `time`
+func (c *MemoryQuestionCache) GetOlder(time int64) []QuestionCacheEntry {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for i, e := range c.Backend {
+		if e.Date > time {
+			return c.Backend[i:]
+		}
+	}
+	return []QuestionCacheEntry{}
 }

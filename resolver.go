@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
-	"log"
+	"io/ioutil"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -30,11 +32,27 @@ type Resolver struct {
 // Lookup will ask each nameserver in top-to-bottom fashion, starting a new request
 // in every second, and return as early as possbile (have an answer).
 // It returns an error if no request has succeeded.
-func (r *Resolver) Lookup(net string, req *dns.Msg) (message *dns.Msg, err error) {
+func (r *Resolver) Lookup(net string, req *dns.Msg, timeout int, interval int, nameServers []string, DoH string) (message *dns.Msg, err error) {
+	logger.Debugf("Lookup %s, timeout: %d, interval: %d, nameservers: %v, Using DoH: %v", net, timeout, interval, nameServers, DoH != "")
+
+	//Is DoH enabled
+	if DoH != "" {
+		//First try and use DOH. Privacy First
+		ans, err := r.DoHLookup(DoH, timeout, req)
+		if err == nil {
+			//No error so result is ok
+			return ans, nil
+		}
+
+		//For some reason the DoH lookup failed so fall back to nameservers
+		logger.Debugf("DoH Failed due to '%s' falling back to nameservers", err)
+
+	}
+
 	c := &dns.Client{
 		Net:          net,
-		ReadTimeout:  r.Timeout(),
-		WriteTimeout: r.Timeout(),
+		ReadTimeout:  r.Timeout(timeout),
+		WriteTimeout: r.Timeout(timeout),
 	}
 
 	qname := req.Question[0].Name
@@ -45,21 +63,17 @@ func (r *Resolver) Lookup(net string, req *dns.Msg) (message *dns.Msg, err error
 		defer wg.Done()
 		r, _, err := c.Exchange(req, nameserver)
 		if err != nil {
-			log.Printf("%s socket error on %s", qname, nameserver)
-			log.Printf("error:%s", err.Error())
+			logger.Errorf("%s socket error on %s", qname, nameserver)
+			logger.Errorf("error:%s", err.Error())
 			return
 		}
 		if r != nil && r.Rcode != dns.RcodeSuccess {
-			if Config.LogLevel > 0 {
-				log.Printf("%s failed to get an valid answer on %s", qname, nameserver)
-			}
+			logger.Warningf("%s failed to get an valid answer on %s", qname, nameserver)
 			if r.Rcode == dns.RcodeServerFailure {
 				return
 			}
 		} else {
-			if Config.LogLevel > 0 {
-				log.Printf("%s resolv on %s (%s)\n", UnFqdn(qname), nameserver, net)
-			}
+			logger.Debugf("%s resolv on %s (%s)\n", UnFqdn(qname), nameserver, net)
 		}
 		select {
 		case res <- r:
@@ -67,13 +81,13 @@ func (r *Resolver) Lookup(net string, req *dns.Msg) (message *dns.Msg, err error
 		}
 	}
 
-	ticker := time.NewTicker(time.Duration(Config.Interval) * time.Millisecond)
+	ticker := time.NewTicker(time.Duration(interval) * time.Millisecond)
 	defer ticker.Stop()
 
 	// Start lookup on each nameserver top-down, in every second
-	for _, nameserver := range r.Nameservers() {
+	for _, nameServer := range nameServers {
 		wg.Add(1)
-		go L(nameserver)
+		go L(nameServer)
 		// but exit early, if we have an answer
 		select {
 		case r := <-res:
@@ -89,16 +103,62 @@ func (r *Resolver) Lookup(net string, req *dns.Msg) (message *dns.Msg, err error
 	case r := <-res:
 		return r, nil
 	default:
-		return nil, ResolvError{qname, net, r.Nameservers()}
+		return nil, ResolvError{qname, net, nameServers}
 	}
 }
 
-// Nameservers return the array of nameservers
-func (r *Resolver) Nameservers() (ns []string) {
-	return Config.Nameservers
+// Timeout returns the resolver timeout
+func (r *Resolver) Timeout(timeout int) time.Duration {
+	return time.Duration(timeout) * time.Second
 }
 
-// Timeout returns the resolver timeout
-func (r *Resolver) Timeout() time.Duration {
-	return time.Duration(Config.Timeout) * time.Second
+//DoHLookup performs a DNS lookup over https
+func (r *Resolver) DoHLookup(url string, timeout int, req *dns.Msg) (*dns.Msg, error) {
+	qname := req.Question[0].Name
+
+	//Turn message into wire format
+	data, err := req.Pack()
+	if err != nil {
+		logger.Errorf("Failed to pack DNS message to wire format; %s", err)
+		return nil, ResolvError{qname, "HTTPS", []string{url}}
+	}
+
+	//Make the request to the server
+	client := http.Client{
+		Timeout: r.Timeout(timeout),
+	}
+
+	reader := bytes.NewReader(data)
+	resp, err := client.Post(url, "application/dns-message", reader)
+	if err != nil {
+		logger.Errorf("Request to DoH server failed; %s", err)
+		return nil, ResolvError{qname, "HTTPS", []string{url}}
+	}
+
+	defer resp.Body.Close()
+
+	//Check the request went ok
+	if resp.StatusCode != http.StatusOK {
+		return nil, ResolvError{qname, "HTTPS", []string{url}}
+	}
+
+	if resp.Header.Get("Content-Type") != "application/dns-message" {
+		return nil, ResolvError{qname, "HTTPS", []string{url}}
+	}
+
+	//Unpack the message from the HTTPS response
+	respPacket, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, ResolvError{qname, "HTTPS", []string{url}}
+	}
+
+	res := dns.Msg{}
+	err = res.Unpack(respPacket)
+	if err != nil {
+		logger.Errorf("Failed to unpack message from response; %s", err)
+		return nil, ResolvError{qname, "HTTPS", []string{url}}
+	}
+
+	//Finally return
+	return &res, nil
 }
