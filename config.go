@@ -9,15 +9,17 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/jonboulle/clockwork"
 )
 
 // BuildVersion returns the build version of grimd, this should be incremented every new release
-var BuildVersion = "1.0.5"
+var BuildVersion = "1.0.7"
 
 // ConfigVersion returns the version of grimd, this should be incremented every time the config changes so grimd presents a warning
-var ConfigVersion = "1.0.2"
+var ConfigVersion = "1.0.8"
 
-type config struct {
+// Config holds the configuration parameters
+type Config struct {
 	Version           string
 	Sources           []string
 	SourceDirs        []string
@@ -26,21 +28,31 @@ type config struct {
 	LogGCPProject     string
 	LogGCPKeyPath     string
 	LogID             string
+	LogConfig         string
 	Bind              string
 	API               string
+	NXDomain          bool
 	Nullroute         string
 	Nullroutev6       string
 	Nameservers       []string
 	Interval          int
 	Timeout           int
-	Expire            int
+	Expire            uint32
 	Maxcount          int
 	QuestionCacheCap  int
 	TTL               uint32
 	Blocklist         []string
 	Whitelist         []string
+	CustomDNSRecords  []string
 	ToggleName        string
 	ReactivationDelay uint
+	APIDebug          bool
+	DoH               string
+	UseDrbl           int
+	DrblPeersFilename string
+	DrblBlockWeight   int64
+	DrblTimeout       int
+	DrblDebug         int
 }
 
 var defaultConfig = `# version this config was generated from
@@ -63,8 +75,14 @@ sourcedirs = [
 "sources"
 ]
 
-# location of the log file
-log = "grimd.log"
+# log configuration
+# format: comma separated list of options, where options is one of 
+#   file:<filename>@<loglevel>
+#   stderr>@<loglevel>
+#   syslog@<loglevel>
+# loglevel: 0 = errors and important operations, 1 = dns queries, 2 = debug
+# e.g. logconfig = "file:grimd.log@2,syslog@1,stderr@2"
+logconfig = "file:grimd.log@2,stderr@2"
 
 logGCPProject = "someproject"
 
@@ -72,14 +90,17 @@ logGCPKeyPath = "./some.json"
 
 logID = "some_id"
 
-# what kind of information should be logged, 0 = errors and important operations, 1 = dns queries, 2 = debug
-loglevel = 0
+# apidebug enables the debug mode of the http api library
+apidebug = false
 
 # address to bind to for the DNS server
 bind = "0.0.0.0:53"
 
 # address to bind to for the API server
 api = "127.0.0.1:8080"
+
+# response to blocked queries with a NXDOMAIN
+nxdomain = false
 
 # ipv4 address to forward blocked queries to
 nullroute = "0.0.0.0"
@@ -88,7 +109,7 @@ nullroute = "0.0.0.0"
 nullroutev6 = "0:0:0:0:0:0:0:0"
 
 # nameservers to forward queries to
-nameservers = ["8.8.8.8:53", "8.8.4.4:53"]
+nameservers = ["1.1.1.1:53", "1.0.0.1:53"]
 
 # concurrency interval for lookups in miliseconds
 interval = 200
@@ -108,11 +129,21 @@ questioncachecap = 5000
 # manual blocklist entries
 blocklist = []
 
+# Drbl related settings
+usedrbl = 0
+drblpeersfilename = "drblpeers.yaml"
+drblblockweight = 128
+drbltimeout = 30
+drbldebug = 0
+
 # manual whitelist entries
 whitelist = [
 	"getsentry.com",
 	"www.getsentry.com"
 ]
+
+# manual custom dns entries
+customdnsrecords = []
 
 # When this string is queried, toggle grimd on and off
 togglename = ""
@@ -120,34 +151,40 @@ togglename = ""
 # If not zero, the delay in seconds before grimd automaticall reactivates after
 # having been turned off.
 reactivationdelay = 300
+
+#Dns over HTTPS provider to use.
+DoH = "https://cloudflare-dns.com/dns-query"
 `
 
-// Config is the global configuration
-var Config config
+// WallClock is the wall clock
+var WallClock = clockwork.NewRealClock()
 
 // LoadConfig loads the given config file
-func LoadConfig(path string) error {
+func LoadConfig(path string) (*Config, error) {
+
+	var config Config
+
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		if err := generateConfig(path); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	if _, err := toml.DecodeFile(path, &Config); err != nil {
-		return fmt.Errorf("could not load config: %s", err)
+	if _, err := toml.DecodeFile(path, &config); err != nil {
+		return nil, fmt.Errorf("could not load config: %s", err)
 	}
 
-	if Config.Version != ConfigVersion {
-		if Config.Version == "" {
-			Config.Version = "none"
+	if config.Version != ConfigVersion {
+		if config.Version == "" {
+			config.Version = "none"
 		}
 
-		log.Printf("warning, grimd.toml is out of date!\nconfig v%s\ngrimd config v%s\ngrimd v%s\nplease update your config\n", Config.Version, ConfigVersion, BuildVersion)
+		log.Printf("warning, grimd.toml is out of date!\nconfig v%s\ngrimd config v%s\ngrimd v%s\nplease update your config\n", config.Version, ConfigVersion, BuildVersion)
 	} else {
 		log.Printf("grimd v%s\n", BuildVersion)
 	}
 
-	return nil
+	return &config, nil
 }
 
 func generateConfig(path string) error {

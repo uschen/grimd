@@ -1,33 +1,41 @@
 package main
 
 import (
-	"log"
+	"net"
 	"net/http"
 	"strconv"
 
-	"gopkg.in/gin-contrib/cors.v1"
 	"github.com/gin-gonic/gin"
+	"gopkg.in/gin-contrib/cors.v1"
 )
 
-// StartAPIServer launches the API server
-func StartAPIServer() error {
-	if Config.LogLevel == 0 {
+// StartAPIServer starts the API server
+func StartAPIServer(config *Config,
+	reloadChan chan bool,
+	blockCache *MemoryBlockCache,
+	questionCache *MemoryQuestionCache) (*http.Server, error) {
+	if !config.APIDebug {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
 	router := gin.Default()
+	server := &http.Server{
+		Addr:    config.API,
+		Handler: router,
+	}
+
 	router.Use(cors.Default())
 
 	router.GET("/blockcache", func(c *gin.Context) {
-		c.IndentedJSON(http.StatusOK, gin.H{"length": BlockCache.Length(), "items": BlockCache.Backend})
+		c.IndentedJSON(http.StatusOK, gin.H{"length": blockCache.Length(), "items": blockCache.Backend})
 	})
 
 	router.GET("/blockcache/exists/:key", func(c *gin.Context) {
-		c.IndentedJSON(http.StatusOK, gin.H{"exists": BlockCache.Exists(c.Param("key"))})
+		c.IndentedJSON(http.StatusOK, gin.H{"exists": blockCache.Exists(c.Param("key"))})
 	})
 
 	router.GET("/blockcache/get/:key", func(c *gin.Context) {
-		if ok, _ := BlockCache.Get(c.Param("key")); !ok {
+		if ok, _ := blockCache.Get(c.Param("key")); !ok {
 			c.IndentedJSON(http.StatusOK, gin.H{"error": c.Param("key") + " not found"})
 		} else {
 			c.IndentedJSON(http.StatusOK, gin.H{"success": ok})
@@ -35,44 +43,51 @@ func StartAPIServer() error {
 	})
 
 	router.GET("/blockcache/length", func(c *gin.Context) {
-		c.IndentedJSON(http.StatusOK, gin.H{"length": BlockCache.Length()})
+		c.IndentedJSON(http.StatusOK, gin.H{"length": blockCache.Length()})
 	})
 
 	router.GET("/blockcache/remove/:key", func(c *gin.Context) {
 		// Removes from BlockCache only. If the domain has already been queried and placed into MemoryCache, will need to wait until item is expired.
-		BlockCache.Remove(c.Param("key"))
+		blockCache.Remove(c.Param("key"))
 		c.IndentedJSON(http.StatusOK, gin.H{"success": true})
 	})
 
 	router.GET("/blockcache/set/:key", func(c *gin.Context) {
 		// MemoryBlockCache Set() always returns nil, so ignoring response.
-		_ = BlockCache.Set(c.Param("key"), true)
+		_ = blockCache.Set(c.Param("key"), true)
 		c.IndentedJSON(http.StatusOK, gin.H{"success": true})
 	})
 
 	router.GET("/questioncache", func(c *gin.Context) {
-		c.IndentedJSON(http.StatusOK, gin.H{"length": QuestionCache.Length(), "items": QuestionCache.Backend})
+		highWater, err := strconv.ParseInt(c.DefaultQuery("highWater", "-1"), 10, 64)
+		if err != nil {
+			highWater = -1
+		}
+		c.IndentedJSON(http.StatusOK, gin.H{
+			"length": questionCache.Length(),
+			"items":  questionCache.GetOlder(highWater),
+		})
 	})
 
 	router.GET("/questioncache/length", func(c *gin.Context) {
-		c.IndentedJSON(http.StatusOK, gin.H{"length": QuestionCache.Length()})
+		c.IndentedJSON(http.StatusOK, gin.H{"length": questionCache.Length()})
 	})
 
 	router.GET("/questioncache/clear", func(c *gin.Context) {
-		QuestionCache.Clear()
+		questionCache.Clear()
 		c.IndentedJSON(http.StatusOK, gin.H{"success": true})
 	})
 
 	router.GET("/questioncache/client/:client", func(c *gin.Context) {
 		var filteredCache []QuestionCacheEntry
 
-		QuestionCache.mu.RLock()
-		for _, entry := range QuestionCache.Backend {
+		questionCache.mu.RLock()
+		for _, entry := range questionCache.Backend {
 			if entry.Remote == c.Param("client") {
 				filteredCache = append(filteredCache, entry)
 			}
 		}
-		QuestionCache.mu.RUnlock()
+		questionCache.mu.RUnlock()
 
 		c.IndentedJSON(http.StatusOK, filteredCache)
 	})
@@ -104,8 +119,8 @@ func StartAPIServer() error {
 				grimdActivation.set(false)
 				c.IndentedJSON(http.StatusOK, gin.H{"active": grimdActive})
 			case "Snooze":
-				timeout_string := c.DefaultQuery("timeout", "300")
-				timeout, err := strconv.ParseUint(timeout_string, 0, 0)
+				timeoutString := c.DefaultQuery("timeout", "300")
+				timeout, err := strconv.ParseUint(timeoutString, 0, 0)
 				if err != nil {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "Illegal value for 'timeout'"})
 				} else {
@@ -121,11 +136,24 @@ func StartAPIServer() error {
 		}
 	})
 
-	if err := router.Run(Config.API); err != nil {
-		return err
+	router.POST("/blocklist/update", func(c *gin.Context) {
+		c.AbortWithStatus(http.StatusOK)
+		// Send reload trigger to chan in background goroutine so does not hang
+		go func(reloadChan chan bool) {
+			reloadChan <- true
+		}(reloadChan)
+	})
+
+	listener, err := net.Listen("tcp", config.API)
+	if err != nil {
+		return nil, err
 	}
+	go func() {
+		if err := server.Serve(listener); err != http.ErrServerClosed {
+			logger.Fatal(err)
+		}
+	}()
 
-	log.Println("API server listening on", Config.API)
-
-	return nil
+	logger.Criticalf("API server listening on %s", config.API)
+	return server, err
 }
