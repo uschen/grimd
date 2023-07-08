@@ -1,7 +1,7 @@
 # grimd
-[![Travis](https://img.shields.io/travis/looterz/grimd.svg?style=flat-square)](https://travis-ci.org/looterz/grimd)
 [![Go Report Card](https://goreportcard.com/badge/github.com/looterz/grimd?style=flat-square)](https://goreportcard.com/report/github.com/looterz/grimd)
 [![GoDoc](https://img.shields.io/badge/godoc-reference-blue.svg?style=flat-square)](http://godoc.org/github.com/looterz/grimd)
+[![Release](https://github.com/looterz/grimd/actions/workflows/release.yaml/badge.svg)](https://github.com/looterz/grimd/releases)
 
 :zap: Fast dns proxy that can run anywhere, built to black-hole internet advertisements and malware servers.
 
@@ -9,27 +9,36 @@ Based on [kenshinx/godns](https://github.com/kenshinx/godns) and [miekg/dns](htt
 
 # Installation
 ```
-go get github.com/looterz/grimd
+go install github.com/looterz/grimd@latest
 ```
 
-You can also download one of the [releases](https://github.com/looterz/grimd/releases), detailed guides and resources can be found on the [wiki](https://github.com/looterz/grimd/wiki).
+You can also download one of the [releases](https://github.com/looterz/grimd/releases) or [docker images](https://github.com/looterz/grimd/pkgs/container/grimd). Detailed guides and resources can be found on the [wiki](https://github.com/looterz/grimd/wiki).
+
+# Docker Installation
+To quickly get grimd up and running with docker, run
+```
+docker run -d -p 53:53/udp -p 53:53/tcp -p 8080:8080/tcp ghcr.io/looterz/grimd:latest
+```
+
+Alternatively, download the [docker-compose.yml](https://raw.githubusercontent.com/looterz/grimd/master/docker-compose.yml) file and launch it using docker-compose.
+```
+docker-compose up -d
+```
 
 # Configuration
 If ```grimd.toml``` is not found, it will be generated for you, below is the default configuration.
 ```toml
 # version this config was generated from
-version = "1.0.6"
+version = "1.0.9"
 
 # list of sources to pull blocklists from, stores them in ./sources
 sources = [
-"http://mirror1.malwaredomains.com/files/justdomains",
+"https://mirror1.malwaredomains.com/files/justdomains",
 "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
-"http://sysctl.org/cameleon/hosts",
-"https://zeustracker.abuse.ch/blocklist.php?download=domainblocklist",
+"https://sysctl.org/cameleon/hosts",
 "https://s3.amazonaws.com/lists.disconnect.me/simple_tracking.txt",
 "https://s3.amazonaws.com/lists.disconnect.me/simple_ad.txt",
-"http://hosts-file.net/ad_servers.txt",
-"https://raw.githubusercontent.com/quidsup/notrack/master/trackers.txt"
+"https://gitlab.com/quidsup/notrack-blocklists/raw/master/notrack-blocklist.txt"
 ]
 
 # list of locations to recursively read blocklists from (warning, every file found is assumed to be a hosts-file or domain list)
@@ -49,6 +58,9 @@ logconfig = "file:grimd.log@2,stderr@2"
 # apidebug enables the debug mode of the http api library
 apidebug = false
 
+# enable the web interface by default
+dashboard = true
+
 # address to bind to for the DNS server
 bind = "0.0.0.0:53"
 
@@ -56,7 +68,7 @@ bind = "0.0.0.0:53"
 api = "127.0.0.1:8080"
 
 # response to blocked queries with a NXDOMAIN
-NXDomain = false
+nxdomain = false
 
 # ipv4 address to forward blocked queries to
 nullroute = "0.0.0.0"
@@ -118,8 +130,29 @@ Requires golang 1.7 or higher, you build grimd like any other golang application
 env GOOS=linux GOARCH=amd64 go build -v github.com/looterz/grimd
 ```
 
+# Building Docker
+Run container and test
+```shell
+mkdir sources
+docker build -t grimd:latest -f docker/Dockerfile . && \
+docker run -v $PWD/sources:/sources --rm -it -P --name grimd-test grimd:latest --config /sources/grimd.toml --update
+```
+
+By default, if the program runs in a docker, it will automatically replace `127.0.0.1` in the default configuration with `0.0.0.0` to ensure that the API interface is available.
+
+```shell
+curl -H "Accept: application/json" http://127.0.0.1:55006/application/active
+```
+
 # Web API
 A restful json api is exposed by default on the local interface, allowing you to build web applications that visualize requests, blocks and the cache. [reaper](https://github.com/looterz/reaper) is the default grimd web frontend.
+
+
+If you want to enable the default dashboard, make sure the configuration file contains the following:
+
+```toml
+dashboard = true
+```
 
 ![reaper-example](http://i.imgur.com/oXLtqSz.png)
 

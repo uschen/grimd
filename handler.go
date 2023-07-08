@@ -99,7 +99,11 @@ func (h *DNSHandler) do(config *Config, blockCache *MemoryBlockCache, questionCa
 			break
 		}
 		func(Net string, w dns.ResponseWriter, req *dns.Msg) {
-			defer w.Close()
+			defer func(w dns.ResponseWriter) {
+				err := w.Close()
+				if err != nil {
+				}
+			}(w)
 			q := req.Question[0]
 
 			qType := dns.TypeToString[q.Qtype]
@@ -155,7 +159,7 @@ func (h *DNSHandler) do(config *Config, blockCache *MemoryBlockCache, questionCa
 					} else {
 						logger.Debugf("%s hit cache\n", Q.String())
 
-						// we need this copy against concurrent modification of Id
+						// we need this copy against concurrent modification of ID
 						msg := *mesg
 						msg.Id = req.Id
 						h.WriteReplyMsg(w, &msg)

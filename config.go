@@ -16,7 +16,7 @@ import (
 var BuildVersion = "1.0.7"
 
 // ConfigVersion returns the version of grimd, this should be incremented every time the config changes so grimd presents a warning
-var ConfigVersion = "1.0.8"
+var ConfigVersion = "1.0.9"
 
 // Config holds the configuration parameters
 type Config struct {
@@ -46,6 +46,7 @@ type Config struct {
 	CustomDNSRecords  []string
 	ToggleName        string
 	ReactivationDelay uint
+	Dashboard         bool
 	APIDebug          bool
 	DoH               string
 	UseDrbl           int
@@ -60,14 +61,12 @@ version = "%s"
 
 # list of sources to pull blocklists from, stores them in ./sources
 sources = [
-"http://mirror1.malwaredomains.com/files/justdomains",
+"https://mirror1.malwaredomains.com/files/justdomains",
 "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
-"http://sysctl.org/cameleon/hosts",
-"https://zeustracker.abuse.ch/blocklist.php?download=domainblocklist",
+"https://sysctl.org/cameleon/hosts",
 "https://s3.amazonaws.com/lists.disconnect.me/simple_tracking.txt",
 "https://s3.amazonaws.com/lists.disconnect.me/simple_ad.txt",
-"http://hosts-file.net/ad_servers.txt",
-"https://raw.githubusercontent.com/quidsup/notrack/master/trackers.txt"
+"https://gitlab.com/quidsup/notrack-blocklists/raw/master/notrack-blocklist.txt"
 ]
 
 # list of locations to recursively read blocklists from (warning, every file found is assumed to be a hosts-file or domain list)
@@ -92,6 +91,9 @@ logID = "some_id"
 
 # apidebug enables the debug mode of the http api library
 apidebug = false
+
+# enable the web interface by default
+dashboard = true
 
 # address to bind to for the DNS server
 bind = "0.0.0.0:53"
@@ -192,7 +194,12 @@ func generateConfig(path string) error {
 	if err != nil {
 		return fmt.Errorf("could not generate config: %s", err)
 	}
-	defer output.Close()
+
+	defer func() {
+		if err := output.Close(); err != nil {
+			logger.Criticalf("Error closing file: %s\n", err)
+		}
+	}()
 
 	r := strings.NewReader(fmt.Sprintf(defaultConfig, ConfigVersion))
 	if _, err := io.Copy(output, r); err != nil {

@@ -1,5 +1,11 @@
 .vscode
 *.test
 pprof/
-grimd
+grimd.exe
 *.swp
+.idea
+sources
+grimd
+grimd.log
+grimd.toml
+.DS_Store
