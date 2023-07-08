@@ -1,23 +1,32 @@
 module github.com/looterz/grimd
 
 require (
-)
-
-require (
-	cloud.google.com/go/logging v1.0.0
+	cloud.google.com/go/logging v1.7.0
 	github.com/BurntSushi/toml v1.2.1
 	github.com/elico/drbl-peer v0.0.0-20190202055151-d5a0a95c4b84
 	github.com/gin-gonic/gin v1.9.1
+	github.com/golang/protobuf v1.5.2
 	github.com/jonboulle/clockwork v0.3.0
 	github.com/miekg/dns v1.1.50
 	github.com/op/go-logging v0.0.0-20160315200505-970db520ece7
 	github.com/ryanuber/go-glob v0.0.0-20170128012129-256dc444b735
+	github.com/satori/go.uuid v1.2.0
 	github.com/stretchr/testify v1.8.3
+	go.uber.org/zap v1.24.0
+	google.golang.org/api v0.110.0
+	google.golang.org/genproto v0.0.0-20230222225845-10f96fb3dbec
 	gopkg.in/gin-contrib/cors.v1 v1.0.0-20170318125340-cf4846e6a636
+)
 
+require (
+	cloud.google.com/go v0.107.0 // indirect
+	cloud.google.com/go/compute v1.18.0 // indirect
+	cloud.google.com/go/compute/metadata v0.2.3 // indirect
+	cloud.google.com/go/longrunning v0.3.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20180720115003-f9ffefc3facf // indirect
 	github.com/bytedance/sonic v1.9.1 // indirect
 	github.com/chenzhuoyu/base64x v0.0.0-20221115062448-fe3a3abad311 // indirect
+	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/elico/dns_resolver v0.0.0-20170210091832-f1a4068131f1 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.2 // indirect
 	github.com/gin-contrib/sse v0.1.0 // indirect
@@ -25,6 +34,10 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.14.0 // indirect
 	github.com/goccy/go-json v0.10.2 // indirect
+	github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e // indirect
+	github.com/google/go-cmp v0.5.9 // indirect
+	github.com/googleapis/enterprise-certificate-proxy v0.2.3 // indirect
+	github.com/googleapis/gax-go/v2 v2.7.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.4 // indirect
 	github.com/kr/pretty v0.1.0 // indirect
@@ -36,13 +49,20 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.11 // indirect
+	go.opencensus.io v0.24.0 // indirect
+	go.uber.org/atomic v1.7.0 // indirect
+	go.uber.org/multierr v1.6.0 // indirect
 	golang.org/x/arch v0.3.0 // indirect
 	golang.org/x/crypto v0.9.0 // indirect
 	golang.org/x/mod v0.8.0 // indirect
 	golang.org/x/net v0.10.0 // indirect
+	golang.org/x/oauth2 v0.5.0 // indirect
+	golang.org/x/sync v0.1.0 // indirect
 	golang.org/x/sys v0.8.0 // indirect
 	golang.org/x/text v0.9.0 // indirect
 	golang.org/x/tools v0.6.0 // indirect
+	google.golang.org/appengine v1.6.7 // indirect
+	google.golang.org/grpc v1.53.0 // indirect
 	google.golang.org/protobuf v1.30.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
