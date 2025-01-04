@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"gopkg.in/gin-contrib/cors.v1"
 )
 
 //go:embed dashboard/reaper

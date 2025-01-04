@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/golang/protobuf/proto"
-	"github.com/golang/protobuf/ptypes/struct"
 	"go.uber.org/zap/buffer"
 	"go.uber.org/zap/zapcore"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // listValueEncoder wrapped structpb., implements zapcore.ArrayEncoder

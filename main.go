@@ -80,10 +80,12 @@ func main() {
 
 	ops := []option.ClientOption{}
 	if config.LogGCPKeyPath != "" {
-		ops = append(ops, option.WithServiceAccountFile(config.LogGCPKeyPath))
+		ops = append(ops, option.WithCredentialsFile(config.LogGCPKeyPath))
 	}
 	clogClient, err := logging.NewClient(context.Background(), config.LogGCPProject, ops...)
-
+	if err != nil {
+		logger.Fatal(err)
+	}
 	defer clogClient.Close()
 	cLogger := clogClient.Logger(config.LogID,
 		logging.CommonLabels(map[string]string{"lang": "go"}),

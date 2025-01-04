@@ -15,3 +15,6 @@ benchcmp:
 	@go test -test.benchmem=true -run=NONE -bench=. ./... > bench_head.test
 	git stash pop
 	benchcmp bench_head.test bench_current.test
+
+build:
+	CGO_ENABLED=0 go build -ldflags "-w -s" -o dist ./...
